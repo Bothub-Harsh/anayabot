@@ -34,23 +34,28 @@ function initializeSocketHandlers(io) {
     try {
       const initData = socket.handshake.auth?.initData;
       const isDev = !process.env.NODE_ENV || process.env.NODE_ENV === 'development' || !process.env.TELEGRAM_BOT_TOKEN;
+      const isGuest = !initData || initData === 'dev_bypass' || initData.startsWith('browser_guest') || !process.env.TELEGRAM_BOT_TOKEN;
 
-      // Development / Test bypass
-      if (isDev && (!initData || initData === 'dev_bypass' || !process.env.TELEGRAM_BOT_TOKEN)) {
+      // Development / Browser guest bypass
+      if (isGuest) {
+        const guestSuffix = (initData && initData.startsWith('browser_guest:'))
+          ? initData.split(':')[1]
+          : 'guest';
+
+        const numericGuestId = Math.abs(
+          guestSuffix.split('').reduce((acc, char) => ((acc << 5) - acc) + char.charCodeAt(0), 0)
+        ) % 900000000 + 100000000;
+
         const user = await createOrUpdateUser({
-          id: 123456789,
-          first_name: 'Player',
-          username: 'ludoplayer',
+          id: numericGuestId,
+          first_name: 'Guest Player',
+          username: `guest_${guestSuffix.slice(-4)}`,
           language_code: 'en'
         });
         socket.userId = user.id || user._id;
         socket.username = user.username || user.first_name;
-        socket.telegramId = 123456789;
+        socket.telegramId = numericGuestId;
         return next();
-      }
-
-      if (!initData) {
-        return next(new Error('Authentication required'));
       }
 
       const telegramUser = verifyTelegramInitData(initData);

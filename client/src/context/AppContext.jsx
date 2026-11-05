@@ -38,9 +38,19 @@ export function AppProvider({ children }) {
         tgInitData = tg.initData || '';
       }
 
-      // Fallback for regular browser dev testing
+      // Fallback for regular browser access (visiting directly outside Telegram)
       if (!tgInitData) {
-        tgInitData = 'dev_bypass';
+        let guestId = '';
+        try {
+          guestId = localStorage.getItem('ludo_guest_id');
+          if (!guestId) {
+            guestId = 'guest_' + Math.random().toString(36).substring(2, 9);
+            localStorage.setItem('ludo_guest_id', guestId);
+          }
+        } catch (e) {
+          guestId = 'guest_' + Math.random().toString(36).substring(2, 9);
+        }
+        tgInitData = `browser_guest:${guestId}`;
       }
 
       setInitDataState(tgInitData);

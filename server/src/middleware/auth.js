@@ -70,28 +70,38 @@ async function requireAuth(req, res, next) {
   const initData = req.headers['x-telegram-init-data'];
   const isDev = !process.env.NODE_ENV || process.env.NODE_ENV === 'development' || !process.env.TELEGRAM_BOT_TOKEN;
 
-  // In development, allow bypass with a test user
-  if (isDev && (!initData || initData === 'dev_bypass' || !process.env.TELEGRAM_BOT_TOKEN)) {
+  // Handle browser guest access or dev bypass (allows web browser preview / testing outside Telegram)
+  const isGuest = !initData || initData === 'dev_bypass' || initData.startsWith('browser_guest') || !process.env.TELEGRAM_BOT_TOKEN;
+
+  if (isGuest) {
+    const guestSuffix = (initData && initData.startsWith('browser_guest:'))
+      ? initData.split(':')[1]
+      : 'guest';
+
+    // Hash suffix into a stable numeric ID
+    const numericGuestId = Math.abs(
+      guestSuffix.split('').reduce((acc, char) => ((acc << 5) - acc) + char.charCodeAt(0), 0)
+    ) % 900000000 + 100000000;
+
     req.telegramUser = {
-      id: 123456789,
-      first_name: 'Player',
-      username: 'ludoplayer',
-      language_code: 'en'
+      id: numericGuestId,
+      first_name: 'Guest Player',
+      username: `guest_${guestSuffix.slice(-4)}`,
+      language_code: 'en',
+      is_guest: true
     };
+
     try {
       const user = await findOrCreateUser(req.telegramUser);
       req.user = user;
       return next();
     } catch (err) {
-      console.error('Dev auth fallback error:', err);
+      console.error('Guest auth fallback error:', err);
       return res.status(500).json({ error: 'Auth failed' });
     }
   }
 
-  if (!initData) {
-    return res.status(401).json({ error: 'Missing Telegram authentication' });
-  }
-
+  // Authoritative Telegram Mini App verification
   const telegramUser = verifyTelegramInitData(initData);
   if (!telegramUser) {
     return res.status(401).json({ error: 'Invalid Telegram authentication' });

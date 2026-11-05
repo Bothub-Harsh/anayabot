@@ -13,7 +13,7 @@ import AdminPage from './pages/AdminPage';
 import MatchNotFoundPage from './pages/MatchNotFoundPage';
 
 function AppContent() {
-  const { user, currentPage, navigate, loading, error } = useApp();
+  const { user, currentPage, navigate, loading, error, initData } = useApp();
 
   if (loading) {
     return (
@@ -97,6 +97,33 @@ function AppContent() {
 
   return (
     <div style={{ minHeight: '100vh', background: 'var(--color-bg)', display: 'flex', flexDirection: 'column' }}>
+      {initData?.startsWith('browser_guest') && (
+        <div style={{
+          background: 'linear-gradient(90deg, #667eea 0%, #764ba2 100%)',
+          color: 'white',
+          padding: '0.45rem 1rem',
+          fontSize: '0.8rem',
+          textAlign: 'center',
+          fontWeight: '500',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          gap: '0.5rem',
+          boxShadow: '0 2px 8px rgba(0,0,0,0.2)'
+        }}>
+          <span>🌐 Browser Preview Mode</span>
+          <span style={{ opacity: 0.7 }}>·</span>
+          <a 
+            href="https://t.me/AnayaReplyBot" 
+            target="_blank" 
+            rel="noopener noreferrer" 
+            style={{ color: '#fed7aa', textDecoration: 'underline', fontWeight: '600' }}
+          >
+            Open in Telegram (@AnayaReplyBot)
+          </a>
+        </div>
+      )}
+
       <main style={{ flex: 1 }}>
         {renderPage()}
       </main>
