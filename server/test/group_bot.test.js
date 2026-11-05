@@ -231,20 +231,28 @@ async function test(description, fn) {
   });
 
   // 10. Direct Telegram Mini App Launch URL format
-  await test('10. getMiniAppDirectLink produces https://t.me/BOT_USERNAME/APP_SHORT_NAME?startapp=MATCH_ID', () => {
+  await test('10. getMiniAppDirectLink produces named app link when short name is configured, and Main Mini App link when empty', () => {
     process.env.TELEGRAM_BOT_USERNAME = 'AnayaReplyBot';
     process.env.TELEGRAM_MINI_APP_SHORT_NAME = 'ludo';
 
     const testMatchId = 'e72089da-b461-460d-a77a-694589d31191';
-    const link = getMiniAppDirectLink(testMatchId);
+    const namedLink = getMiniAppDirectLink(testMatchId);
 
     assert.strictEqual(
-      link,
+      namedLink,
       `https://t.me/AnayaReplyBot/ludo?startapp=${testMatchId}`
     );
-    assert.strictEqual(link.includes('localhost'), false);
-    assert.strictEqual(link.includes('http://'), false);
-    assert.ok(link.startsWith('https://t.me/'));
+
+    // Test Main Mini App link (when short name is empty)
+    process.env.TELEGRAM_MINI_APP_SHORT_NAME = '';
+    const mainAppLink = getMiniAppDirectLink(testMatchId);
+    assert.strictEqual(
+      mainAppLink,
+      `https://t.me/AnayaReplyBot?startapp=${testMatchId}`
+    );
+    assert.strictEqual(mainAppLink.includes('localhost'), false);
+    assert.strictEqual(mainAppLink.includes('http://'), false);
+    assert.ok(mainAppLink.startsWith('https://t.me/'));
   });
 
   // 11. Match Ready Message format
@@ -272,6 +280,7 @@ async function test(description, fn) {
 
   // 12. OPEN GAME Keyboard Button
   await test('12. buildOpenGameKeyboard creates single 🎮 OPEN GAME direct launch button', () => {
+    process.env.TELEGRAM_MINI_APP_SHORT_NAME = '';
     const testMatchId = 'test-match-uuid-999';
     const kb = buildOpenGameKeyboard(testMatchId);
 
@@ -283,7 +292,7 @@ async function test(description, fn) {
     assert.strictEqual(btn.text, '🎮 OPEN GAME');
     assert.strictEqual(
       btn.url,
-      `https://t.me/AnayaReplyBot/ludo?startapp=${testMatchId}`
+      `https://t.me/AnayaReplyBot?startapp=${testMatchId}`
     );
   });
 

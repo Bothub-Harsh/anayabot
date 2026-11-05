@@ -23,7 +23,7 @@ const {
 
 let bot = null;
 const BOT_USERNAME = process.env.TELEGRAM_BOT_USERNAME || 'AnayaReplyBot';
-const MINI_APP_SHORT_NAME = process.env.TELEGRAM_MINI_APP_SHORT_NAME || 'ludo';
+const MINI_APP_SHORT_NAME = process.env.TELEGRAM_MINI_APP_SHORT_NAME || '';
 
 /**
  * Validates whether a URL is a valid, public HTTPS URL acceptable for Telegram WebApp
@@ -65,14 +65,19 @@ function getValidWebAppUrl(pathOrParams = '') {
 
 /**
  * Generates direct Telegram Mini App launch link
- * Format: https://t.me/BOT_USERNAME/APP_SHORT_NAME?startapp=MATCH_ID
+ * If short name is configured (via /newapp in BotFather), uses: https://t.me/BOT_USERNAME/SHORT_NAME?startapp=MATCH_ID
+ * Otherwise uses Main Mini App launch link: https://t.me/BOT_USERNAME?startapp=MATCH_ID
  */
 function getMiniAppDirectLink(matchId = '') {
   const botUsername = (process.env.TELEGRAM_BOT_USERNAME || BOT_USERNAME || 'AnayaReplyBot').trim().replace(/^@/, '');
-  const shortName = (process.env.TELEGRAM_MINI_APP_SHORT_NAME || MINI_APP_SHORT_NAME || 'ludo').trim();
+  const shortName = (
+    process.env.TELEGRAM_MINI_APP_SHORT_NAME !== undefined
+      ? process.env.TELEGRAM_MINI_APP_SHORT_NAME
+      : MINI_APP_SHORT_NAME
+  ).trim();
 
   const param = matchId ? String(matchId).trim() : '';
-  if (shortName) {
+  if (shortName && shortName !== 'none' && shortName !== 'main') {
     return `https://t.me/${botUsername}/${shortName}${param ? `?startapp=${param}` : ''}`;
   }
   return `https://t.me/${botUsername}${param ? `?startapp=${param}` : ''}`;
@@ -440,7 +445,35 @@ function initializeBot() {
       }
 
       // Private Chat Welcome
-      const webAppUrl = getValidWebAppUrl(startParam ? `?join=${startParam}` : '');
+      if (startParam) {
+        const matchIdentifier = startParam.replace(/^match_/, '').trim();
+        const webAppMatchUrl = getValidWebAppUrl(`?matchId=${matchIdentifier}&startapp=${matchIdentifier}`);
+
+        const matchWelcomeText =
+          `🎲 *LUDO MATCH IS READY!*\n\n` +
+          `The match has started!\n\n` +
+          `Tap *OPEN GAME* below to enter the game and play!`;
+
+        const matchKeyboard = {
+          inline_keyboard: [
+            [
+              webAppMatchUrl
+                ? { text: '🎮 OPEN GAME', web_app: { url: webAppMatchUrl } }
+                : { text: '🎮 OPEN GAME', url: getMiniAppDirectLink(matchIdentifier) }
+            ],
+            [
+              { text: '👁 Spectate Matches', url: getValidWebAppUrl('?page=spectate') || getMiniAppDirectLink(matchIdentifier) }
+            ]
+          ]
+        };
+
+        return safeSendMessage(chatId, matchWelcomeText, {
+          parse_mode: 'Markdown',
+          reply_markup: matchKeyboard
+        });
+      }
+
+      const webAppUrl = getValidWebAppUrl();
       const clientUrl = process.env.CLIENT_URL || 'http://localhost:5173';
 
       let welcomeText =
