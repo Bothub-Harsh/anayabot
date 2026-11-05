@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "description": "Ludo Arena - Full-Stack Telegram Gaming Experience",
   "scripts": {
-    "dev": "concurrently -n \"server,client\" -c \"blue,magenta\" \"npm run dev --prefix server\" \"npm run dev --prefix client\"",
+    "dev": "node scripts/dev.js",
     "start": "npm run start --prefix server",
     "test": "node server/test/ludo.test.js && node server/test/bot.test.js && node server/test/group_bot.test.js && node server/test/health.test.js",
     "build": "npm install --prefix client && npm run build --prefix client && node -e \"const fs=require('fs'); if(fs.existsSync('client/dist')){fs.cpSync('client/dist','dist',{recursive:true});}\"",
@@ -11,7 +11,7 @@
     "build:server": "npm install --prefix server",
     "migrate": "npm run migrate --prefix server"
   },
-  "devDependencies": {
+  "dependencies": {
     "concurrently": "^8.2.2"
   }
 }

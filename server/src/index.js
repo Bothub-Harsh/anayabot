@@ -1,4 +1,5 @@
 const path = require('path');
+const fs = require('fs');
 const dotenv = require('dotenv');
 
 // Load .env from server directory first, fallback to root directory
@@ -114,7 +115,22 @@ app.use('/api/leaderboard', leaderboardRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/chat', chatRoutes);
 
-// 404 handler
+// Serve static React client files in production if built
+const clientDist = path.resolve(__dirname, '../../client/dist');
+const rootDist = path.resolve(__dirname, '../../dist');
+const staticDir = fs.existsSync(clientDist) ? clientDist : (fs.existsSync(rootDist) ? rootDist : null);
+
+if (staticDir) {
+  app.use(express.static(staticDir));
+  app.get('*', (req, res, next) => {
+    if (req.path.startsWith('/api') || req.path === '/health') {
+      return next();
+    }
+    res.sendFile(path.join(staticDir, 'index.html'));
+  });
+}
+
+// 404 handler (for unmatched /api calls or when static build is not present)
 app.use((req, res) => {
   res.status(404).json({ error: 'Route not found' });
 });
