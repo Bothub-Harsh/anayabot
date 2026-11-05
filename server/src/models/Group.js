@@ -23,3 +23,4 @@ GroupSchema.virtual('id').get(function() {
 });
 
 module.exports = mongoose.models.Group || mongoose.model('Group', GroupSchema);
+

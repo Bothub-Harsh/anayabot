@@ -11,8 +11,19 @@ const {
   leaveMatch,
   getMatchById
 } = require('../services/matchService');
-const { query } = require('../database/db');
-const { verifyTelegramInitData, findOrCreateUser } = require('../middleware/auth');
+const { 
+  findUserByTelegramId,
+  createOrUpdateUser,
+  addSpectator,
+  removeSpectator,
+  addComment,
+  addReaction,
+  findMatchById,
+  updateMatchDoc,
+  models,
+  memoryStore
+} = require('../database/db');
+const { verifyTelegramInitData } = require('../middleware/auth');
 
 // Track connected sockets per match
 const matchConnections = new Map(); // matchId -> Set of socket IDs
@@ -26,13 +37,13 @@ function initializeSocketHandlers(io) {
 
       // Development / Test bypass
       if (isDev && (!initData || initData === 'dev_bypass' || !process.env.TELEGRAM_BOT_TOKEN)) {
-        const user = await findOrCreateUser({
+        const user = await createOrUpdateUser({
           id: 123456789,
           first_name: 'Player',
           username: 'ludoplayer',
           language_code: 'en'
         });
-        socket.userId = user.id;
+        socket.userId = user.id || user._id;
         socket.username = user.username || user.first_name;
         socket.telegramId = 123456789;
         return next();
@@ -47,23 +58,16 @@ function initializeSocketHandlers(io) {
         return next(new Error('Invalid authentication'));
       }
 
-      // Find user in DB or create if newly joining
-      let user = null;
-      const result = await query(
-        'SELECT * FROM users WHERE telegram_id = $1',
-        [telegramUser.id]
-      );
-
-      if (result.rows.length > 0) {
-        user = result.rows[0];
-      } else {
-        user = await findOrCreateUser(telegramUser);
+      let user = await findUserByTelegramId(telegramUser.id);
+      if (!user) {
+        user = await createOrUpdateUser(telegramUser);
       }
+      
       if (user.is_banned) {
         return next(new Error('Account banned'));
       }
 
-      socket.userId = user.id;
+      socket.userId = user.id || user._id;
       socket.username = user.username || user.first_name;
       socket.telegramId = telegramUser.id;
       next();
@@ -101,12 +105,7 @@ function initializeSocketHandlers(io) {
 
         // If spectator, record in DB
         if (role === 'spectator') {
-          await query(
-            `INSERT INTO spectators (match_id, user_id) 
-             VALUES ($1, $2) 
-             ON CONFLICT (match_id, user_id) DO UPDATE SET left_at = NULL`,
-            [matchId, socket.userId]
-          );
+          await addSpectator(matchId, socket.userId);
         }
 
         // Send current match state
@@ -147,11 +146,7 @@ function initializeSocketHandlers(io) {
         socketToUser.delete(socket.id);
 
         if (userInfo?.role === 'spectator') {
-          await query(
-            `UPDATE spectators SET left_at = NOW() 
-             WHERE match_id = $1 AND user_id = $2`,
-            [matchId, socket.userId]
-          );
+          await removeSpectator(matchId, socket.userId);
         }
 
         socket.to(`match:${matchId}`).emit('player_disconnected', {
@@ -283,18 +278,16 @@ function initializeSocketHandlers(io) {
           return socket.emit('error', { message: 'Message too long (max 500 chars)' });
         }
 
-        // Check if match exists and user is participant/spectator
-        const result = await query(
-          `INSERT INTO comments (match_id, user_id, message, message_type)
-           VALUES ($1, $2, $3, $4)
-           RETURNING *`,
-          [matchId, socket.userId, message.trim(), messageType]
-        );
-
-        const comment = result.rows[0];
+        const comment = await addComment({
+          match_id: matchId,
+          user_id: socket.userId,
+          username: socket.username,
+          message: message.trim(),
+          message_type: messageType
+        });
 
         io.to(`match:${matchId}`).emit('new_message', {
-          id: comment.id,
+          id: comment.id || comment._id,
           userId: socket.userId,
           username: socket.username,
           message: comment.message,
@@ -315,22 +308,9 @@ function initializeSocketHandlers(io) {
           return socket.emit('error', { message: 'Invalid emoji' });
         }
 
-        await query(
-          `INSERT INTO reactions (comment_id, user_id, emoji)
-           VALUES ($1, $2, $3)
-           ON CONFLICT (comment_id, user_id) DO UPDATE SET emoji = $3`,
-          [commentId, socket.userId, emoji]
-        );
-
-        // Get match room for this comment
-        const commentResult = await query(
-          'SELECT match_id FROM comments WHERE id = $1',
-          [commentId]
-        );
-
-        if (commentResult.rows[0]) {
-          const matchId = commentResult.rows[0].match_id;
-          io.to(`match:${matchId}`).emit('reaction_added', {
+        const comment = await addReaction(commentId, socket.userId, emoji);
+        if (comment) {
+          io.to(`match:${comment.match_id}`).emit('reaction_added', {
             commentId,
             userId: socket.userId,
             emoji
@@ -356,11 +336,16 @@ function initializeSocketHandlers(io) {
 
     socket.on('player_ready', async ({ matchId, isReady }) => {
       try {
-        await query(
-          `UPDATE match_players SET is_ready = $3
-           WHERE match_id = $1 AND user_id = $2`,
-          [matchId, socket.userId, isReady]
-        );
+        const match = await findMatchById(matchId);
+        if (match) {
+          const players = (match.players || []).map(p => {
+            if (p.userId === socket.userId) {
+              return { ...p, isReady: !!isReady };
+            }
+            return p;
+          });
+          await updateMatchDoc(matchId, { players });
+        }
 
         io.to(`match:${matchId}`).emit('player_ready_changed', {
           userId: socket.userId,
@@ -397,53 +382,35 @@ function initializeSocketHandlers(io) {
 
         // Update spectator record
         if (role === 'spectator') {
-          await query(
-            `UPDATE spectators SET left_at = NOW() 
-             WHERE match_id = $1 AND user_id = $2 AND left_at IS NULL`,
-            [matchId, socket.userId]
-          ).catch(console.error);
+          await removeSpectator(matchId, socket.userId).catch(console.error);
         }
       }
     });
   });
-
-  // Helper: broadcast to lobby when match list changes
-  function broadcastLobbyUpdate(io) {
-    // Throttle to avoid spam
-    clearTimeout(broadcastLobbyUpdate._timeout);
-    broadcastLobbyUpdate._timeout = setTimeout(async () => {
-      try {
-        const { getPublicMatches } = require('../services/matchService');
-        const matches = await getPublicMatches();
-        io.to('lobby').emit('lobby_updated', { matches });
-      } catch (err) {
-        console.error('Failed to broadcast lobby update:', err);
-      }
-    }, 500);
-  }
 
   return { matchConnections, socketToUser };
 }
 
 async function addSystemMessage(matchId, message, io) {
   try {
-    const result = await query(
-      `INSERT INTO comments (match_id, user_id, message, is_system, message_type)
-       SELECT $1, creator_id, $2, true, 'system'
-       FROM matches WHERE id = $1
-       RETURNING *`,
-      [matchId, message]
-    );
+    const comment = await addComment({
+      match_id: matchId,
+      user_id: 'system',
+      username: 'System',
+      message,
+      is_system: true,
+      message_type: 'system'
+    });
 
-    if (result.rows[0] && io) {
+    if (comment && io) {
       io.to(`match:${matchId}`).emit('new_message', {
-        id: result.rows[0].id,
+        id: comment.id || comment._id,
         userId: null,
         username: 'System',
         message,
         messageType: 'system',
         isSystem: true,
-        createdAt: result.rows[0].created_at
+        createdAt: comment.created_at
       });
     }
   } catch (error) {

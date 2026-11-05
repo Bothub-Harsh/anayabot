@@ -23,3 +23,4 @@ GameStateSchema.virtual('id').get(function() {
 });
 
 module.exports = mongoose.models.GameState || mongoose.model('GameState', GameStateSchema);
+

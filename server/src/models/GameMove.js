@@ -27,3 +27,4 @@ GameMoveSchema.virtual('id').get(function() {
 GameMoveSchema.index({ match_id: 1, created_at: 1 });
 
 module.exports = mongoose.models.GameMove || mongoose.model('GameMove', GameMoveSchema);
+

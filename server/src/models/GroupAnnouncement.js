@@ -18,3 +18,4 @@ GroupAnnouncementSchema.virtual('id').get(function() {
 });
 
 module.exports = mongoose.models.GroupAnnouncement || mongoose.model('GroupAnnouncement', GroupAnnouncementSchema);
+

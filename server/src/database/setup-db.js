@@ -5,63 +5,42 @@ dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 dotenv.config({ path: path.resolve(__dirname, '../../../.env') });
 dotenv.config();
 
-const { Client } = require('pg');
-const { initializeDatabase } = require('./db');
+const { initializeDatabase, closeDatabase, models } = require('./db');
 
 async function setup() {
-  const connectionString = process.env.DATABASE_URL;
+  const uri = process.env.MONGODB_URI;
 
-  if (!connectionString) {
-    console.log('❌ DATABASE_URL is not set in your .env file.');
-    console.log('👉 Please set DATABASE_URL=postgresql://USERNAME:PASSWORD@localhost:5432/ludo_arena');
-    process.exit(1);
+  if (!uri) {
+    console.log('⚠️ MONGODB_URI is not set in your .env file.');
+    console.log('👉 Please set MONGODB_URI=mongodb+srv://<username>:<password>@cluster.mongodb.net/ludo_arena?retryWrites=true&w=majority');
+    console.log('ℹ️ Running in memoryStore dev mode for now.');
   }
 
-  console.log('🔄 Checking PostgreSQL connection...');
-  
-  // Parse target database
-  const url = new URL(connectionString);
-  const targetDb = url.pathname.replace(/^\//, '') || 'ludo_arena';
-  
-  // Connect to postgres default database first to ensure server is reachable and create targetDb if needed
-  url.pathname = '/postgres';
-  const rootClient = new Client({ connectionString: url.toString() });
+  console.log('🔄 Checking MongoDB connection & ensuring schemas/indexes...');
 
-  try {
-    await rootClient.connect();
-    console.log('✅ Connected to PostgreSQL server.');
-
-    // Check if target database exists
-    const checkDb = await rootClient.query(
-      'SELECT 1 FROM pg_database WHERE datname = $1',
-      [targetDb]
-    );
-
-    if (checkDb.rows.length === 0) {
-      console.log(`📦 Database "${targetDb}" does not exist. Creating it now...`);
-      await rootClient.query(`CREATE DATABASE "${targetDb}"`);
-      console.log(`✅ Database "${targetDb}" created successfully!`);
-    } else {
-      console.log(`✅ Database "${targetDb}" exists.`);
-    }
-
-    await rootClient.end();
-  } catch (err) {
-    console.warn(`⚠️ Could not auto-check postgres root database (${err.message}). Attempting direct connection to ${targetDb}...`);
-    try { await rootClient.end(); } catch (e) {}
-  }
-
-  // Now run migrations on target database
-  console.log('🔄 Running database migrations on', targetDb, '...');
   try {
     await initializeDatabase();
-    console.log('🎉 PostgreSQL setup and migrations completed successfully!');
+    
+    // Ensure all model indexes are created if connected to MongoDB
+    const mongoose = require('mongoose');
+    if (mongoose.connection.readyState === 1) {
+      for (const [modelName, model] of Object.entries(models)) {
+        if (model && typeof model.createIndexes === 'function') {
+          await model.createIndexes();
+          console.log(`✅ Collection and indexes verified: ${modelName}`);
+        }
+      }
+      console.log('🎉 MongoDB Atlas setup & schema initialization completed successfully!');
+    } else {
+      console.log('ℹ️ Running in memory dev mode. Add MONGODB_URI when ready to connect to Atlas.');
+    }
+
+    await closeDatabase();
     process.exit(0);
   } catch (err) {
-    console.error('❌ Migration failed:', err.message);
+    console.error('❌ MongoDB setup failed:', err.message);
     process.exit(1);
   }
 }
 
 setup();
-

@@ -35,3 +35,4 @@ UserSchema.index({ wins: -1, total_xp: -1 });
 UserSchema.index({ is_banned: 1 });
 
 module.exports = mongoose.models.User || mongoose.model('User', UserSchema);
+

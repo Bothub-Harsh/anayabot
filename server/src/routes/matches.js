@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { requireAuth, optionalAuth } = require('../middleware/auth');
 const matchService = require('../services/matchService');
-const { getPublicGameState } = require('../game/ludoEngine');
+const { findGameMoves } = require('../database/db');
 
 /**
  * GET /api/matches
@@ -153,17 +153,8 @@ router.get('/:matchId/state', requireAuth, async (req, res) => {
  */
 router.get('/:matchId/moves', optionalAuth, async (req, res) => {
   try {
-    const { query } = require('../database/db');
-    const result = await query(
-      `SELECT gm.*, u.username, u.first_name
-       FROM game_moves gm
-       JOIN users u ON gm.user_id = u.id
-       WHERE gm.match_id = $1
-       ORDER BY gm.created_at ASC
-       LIMIT 500`,
-      [req.params.matchId]
-    );
-    res.json({ moves: result.rows });
+    const moves = await findGameMoves(req.params.matchId);
+    res.json({ moves });
   } catch (error) {
     console.error('Get moves error:', error);
     res.status(500).json({ error: 'Failed to fetch moves' });

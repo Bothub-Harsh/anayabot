@@ -1,5 +1,10 @@
 const TelegramBot = require('node-telegram-bot-api');
-const { query } = require('../database/db');
+const {
+  findUserByTelegramId,
+  getLeaderboardUsers,
+  models,
+  memoryStore
+} = require('../database/db');
 const { findOrCreateUser } = require('../middleware/auth');
 const {
   createMatch,
@@ -7,6 +12,8 @@ const {
   startMatch,
   cancelMatch,
   getMatchById,
+  getMatchByRoomCode,
+  getPublicMatches,
   getWaitingMatchByGroup,
   getActiveGroupMatches,
   updateMatchTelegramMessage,
@@ -561,8 +568,7 @@ function initializeBot() {
         let targetMatch = null;
 
         if (codeOrId) {
-          const res = await query('SELECT * FROM matches WHERE room_code = $1', [codeOrId]);
-          targetMatch = res.rows[0];
+          targetMatch = await getMatchByRoomCode(codeOrId);
         } else if (isGroupChat(msg.chat)) {
           targetMatch = await getWaitingMatchByGroup(chatId);
         }
@@ -666,13 +672,13 @@ function initializeBot() {
       try {
         const activeMatches = isGroupChat(msg.chat)
           ? await getActiveGroupMatches(chatId)
-          : (await query(`SELECT * FROM matches WHERE status IN ('waiting', 'playing') LIMIT 5`)).rows;
+          : await getPublicMatches();
 
         if (!activeMatches || activeMatches.length === 0) {
           return safeSendMessage(chatId, '👁 No live matches are currently running. Send /newgame to start one!');
         }
 
-        const lines = activeMatches.map(m => {
+        const lines = activeMatches.slice(0, 5).map(m => {
           const statusIcon = m.status === 'playing' ? '🔴 LIVE' : '⏳ Waiting';
           return `• *${m.name}* [\`${m.room_code}\`] — ${m.current_players}/${m.max_players} (${statusIcon})`;
         });
@@ -704,29 +710,16 @@ function initializeBot() {
     bot.onText(/\/matches(?:@\w+)?/, async (msg) => {
       const chatId = msg.chat.id;
       try {
-        let result;
-        if (isGroupChat(msg.chat)) {
-          result = await query(
-            `SELECT m.room_code, m.name, m.current_players, m.max_players, m.status
-             FROM matches m
-             WHERE m.telegram_group_id = $1 AND m.status IN ('waiting', 'playing')
-             ORDER BY m.created_at DESC LIMIT 5`,
-            [chatId]
-          );
-        } else {
-          result = await query(
-            `SELECT m.room_code, m.name, m.current_players, m.max_players, m.status
-             FROM matches m
-             WHERE m.status IN ('waiting', 'playing') AND m.visibility = 'public'
-             ORDER BY m.created_at DESC LIMIT 8`
-          );
-        }
+        const matches = isGroupChat(msg.chat)
+          ? await getActiveGroupMatches(chatId)
+          : await getPublicMatches();
 
-        if (result.rows.length === 0) {
+        if (!matches || matches.length === 0) {
           return safeSendMessage(chatId, '🎲 No active matches right now. Use /newgame to create one!');
         }
 
-        const text = result.rows
+        const text = matches
+          .slice(0, 8)
           .map(m => `• *${m.name}* [Code: \`${m.room_code}\`] — ${m.current_players}/${m.max_players} (${m.status})`)
           .join('\n');
 
@@ -742,21 +735,14 @@ function initializeBot() {
     bot.onText(/\/leaderboard(?:@\w+)?/, async (msg) => {
       const chatId = msg.chat.id;
       try {
-        const result = await query(
-          `SELECT u.username, u.first_name, pp.wins, pp.total_matches, pp.total_xp
-           FROM users u
-           JOIN player_profiles pp ON u.id = pp.user_id
-           WHERE pp.total_matches > 0
-           ORDER BY pp.wins DESC, pp.total_xp DESC
-           LIMIT 10`
-        );
+        const { leaderboard } = await getLeaderboardUsers({ limit: 10 });
 
-        if (result.rows.length === 0) {
+        if (!leaderboard || leaderboard.length === 0) {
           return safeSendMessage(chatId, '🏆 No match records found yet! Be the first to win by sending /newgame!');
         }
 
         const medals = ['🥇', '🥈', '🥉', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣', '🔟'];
-        const text = result.rows
+        const text = leaderboard
           .map((r, i) => `${medals[i]} ${r.username ? '@' + r.username : r.first_name}: *${r.wins} wins* (${r.total_matches} matches, ${r.total_xp || 0} XP)`)
           .join('\n');
 
@@ -772,20 +758,12 @@ function initializeBot() {
     bot.onText(/\/profile(?:@\w+)?/, async (msg) => {
       const chatId = msg.chat.id;
       try {
-        const result = await query(
-          `SELECT u.*, pp.total_matches, pp.wins, pp.losses, pp.win_streak,
-                  pp.best_win_streak, pp.total_xp, pp.level
-           FROM users u
-           LEFT JOIN player_profiles pp ON u.id = pp.user_id
-           WHERE u.telegram_id = $1`,
-          [msg.from.id]
-        );
+        const p = await findUserByTelegramId(msg.from.id);
 
-        if (result.rows.length === 0) {
+        if (!p) {
           return safeSendMessage(chatId, 'Profile not found. Please send /start first to register.');
         }
 
-        const p = result.rows[0];
         const winRate = p.total_matches > 0
           ? ((p.wins / p.total_matches) * 100).toFixed(1)
           : '0.0';
@@ -882,23 +860,36 @@ function initializeBot() {
     bot.onText(/\/history(?:@\w+)?/, async (msg) => {
       const chatId = msg.chat.id;
       try {
-        const result = await query(
-          `SELECT m.room_code, m.completed_at, mp.finished_position, mp.color
-           FROM match_players mp
-           JOIN matches m ON mp.match_id = m.id
-           JOIN users u ON mp.user_id = u.id
-           WHERE u.telegram_id = $1 AND m.status = 'completed'
-           ORDER BY m.completed_at DESC
-           LIMIT 10`,
-          [msg.from.id]
-        );
+        const user = await findUserByTelegramId(msg.from.id);
+        let historyMatches = [];
+        if (user) {
+          const userId = user.id || user._id;
+          if (models.Match && models.Match.db.readyState === 1) {
+            historyMatches = await models.Match.find({
+              'players.userId': userId,
+              status: 'completed'
+            })
+            .sort({ completed_at: -1 })
+            .limit(10)
+            .lean();
+          } else {
+            historyMatches = Array.from(memoryStore.matches.values())
+              .filter(m => m.status === 'completed' && (m.players || []).some(p => p.userId === userId))
+              .sort((a, b) => new Date(b.completed_at || 0) - new Date(a.completed_at || 0))
+              .slice(0, 10);
+          }
+        }
 
-        if (result.rows.length === 0) {
+        if (!historyMatches || historyMatches.length === 0) {
           return safeSendMessage(chatId, '📜 No completed matches in your history yet.');
         }
 
-        const text = result.rows
-          .map(m => `• Match \`${m.room_code}\` | ${m.color.toUpperCase()} | Finished: #${m.finished_position || '-'}`)
+        const userId = user?.id || user?._id;
+        const text = historyMatches
+          .map(m => {
+            const p = (m.players || []).find(x => x.userId === userId);
+            return `• Match \`${m.room_code}\` | ${(p?.color || 'red').toUpperCase()} | Finished: #${p?.finished_position || '-'}`;
+          })
           .join('\n');
 
         await safeSendMessage(chatId, `📜 *Recent Matches:*\n\n${text}`, { parse_mode: 'Markdown' });
@@ -962,32 +953,23 @@ function initializeBot() {
         // --- 2. Leaderboard callback ---
         if (data === 'group_leaderboard') {
           await bot.answerCallbackQuery(queryObj.id);
-          const top = await query(
-            `SELECT u.username, u.first_name, pp.wins, pp.total_matches
-             FROM users u
-             JOIN player_profiles pp ON u.id = pp.user_id
-             WHERE pp.total_matches > 0
-             ORDER BY pp.wins DESC LIMIT 5`
-          );
-          if (top.rows.length === 0) {
+          const { leaderboard } = await getLeaderboardUsers({ limit: 5 });
+          if (!leaderboard || leaderboard.length === 0) {
             return safeSendMessage(chatId, '🏆 No match records found yet! Use /newgame to play!');
           }
           const medals = ['🥇', '🥈', '🥉', '4️⃣', '5️⃣'];
-          const lines = top.rows.map((r, i) => `${medals[i]} ${r.username ? '@' + r.username : r.first_name}: ${r.wins} wins`);
+          const lines = leaderboard.map((r, i) => `${medals[i]} ${r.username ? '@' + r.username : r.first_name}: ${r.wins} wins`);
           return safeSendMessage(chatId, `🏆 *Top Champions:*\n\n${lines.join('\n')}`, { parse_mode: 'Markdown' });
         }
 
         // --- 3. View matches callback ---
         if (data === 'group_matches') {
           await bot.answerCallbackQuery(queryObj.id);
-          const active = await query(
-            `SELECT room_code, name, current_players, max_players, status 
-             FROM matches WHERE status IN ('waiting', 'playing') LIMIT 5`
-          );
-          if (active.rows.length === 0) {
+          const active = await getPublicMatches();
+          if (!active || active.length === 0) {
             return safeSendMessage(chatId, '🎲 No active matches right now. Send /newgame to start one!');
           }
-          const list = active.rows.map(m => `• *${m.name}* [\`${m.room_code}\`] (${m.current_players}/${m.max_players})`).join('\n');
+          const list = active.slice(0, 5).map(m => `• *${m.name}* [\`${m.room_code}\`] (${m.current_players}/${m.max_players})`).join('\n');
           return safeSendMessage(chatId, `🎮 *Active Matches:*\n\n${list}`, { parse_mode: 'Markdown' });
         }
 
@@ -1153,11 +1135,13 @@ function initializeBot() {
         }
 
         // Acknowledge any other callback
-        await bot.answerCallbackQuery(queryObj.id);
+        await bot.answerCallbackQuery(queryObj.id).catch(() => {});
       } catch (cbErr) {
-        console.error('Error handling callback_query:', cbErr);
+        if (!cbErr.message?.includes('query is too old')) {
+          console.error('Error handling callback_query:', cbErr.message);
+        }
         try {
-          await bot.answerCallbackQuery(queryObj.id, { text: 'An error occurred.' });
+          await bot.answerCallbackQuery(queryObj.id, { text: 'An error occurred.' }).catch(() => {});
         } catch (e) {}
       }
     });

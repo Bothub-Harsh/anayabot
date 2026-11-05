@@ -1,11 +1,11 @@
 const express = require('express');
 const router = express.Router();
 const { requireAuth, findOrCreateUser, verifyTelegramInitData } = require('../middleware/auth');
-const { query } = require('../database/db');
+const { findUserById } = require('../database/db');
 
 function formatUserResponse(u) {
   return {
-    id: u.id,
+    id: u.id || u._id,
     telegramId: u.telegram_id,
     telegram_id: u.telegram_id,
     username: u.username,
@@ -15,8 +15,8 @@ function formatUserResponse(u) {
     last_name: u.last_name,
     photoUrl: u.photo_url,
     photo_url: u.photo_url,
-    isAdmin: u.is_admin,
-    is_admin: u.is_admin,
+    isAdmin: !!u.is_admin,
+    is_admin: !!u.is_admin,
     level: u.level || 1,
     totalXp: u.total_xp || 0,
     total_xp: u.total_xp || 0,
@@ -66,21 +66,9 @@ async function handleLogin(req, res) {
       });
     }
 
-    // Fetch full stats
-    const statsResult = await query(
-      `SELECT u.*, pp.total_matches, pp.wins, pp.losses, pp.win_streak,
-              pp.best_win_streak, pp.total_xp, pp.level
-       FROM users u
-       LEFT JOIN player_profiles pp ON u.id = pp.user_id
-       WHERE u.id = $1`,
-      [user.id]
-    );
-
-    const fullUser = statsResult.rows[0] || user;
-
     res.json({
       success: true,
-      user: formatUserResponse(fullUser)
+      user: formatUserResponse(user)
     });
   } catch (error) {
     console.error('Login error:', error);
@@ -98,16 +86,8 @@ router.post('/telegram', handleLogin);
  */
 router.get('/me', requireAuth, async (req, res) => {
   try {
-    const statsResult = await query(
-      `SELECT u.*, pp.total_matches, pp.wins, pp.losses, pp.win_streak,
-              pp.best_win_streak, pp.total_xp, pp.level
-       FROM users u
-       LEFT JOIN player_profiles pp ON u.id = pp.user_id
-       WHERE u.id = $1`,
-      [req.user.id]
-    );
-
-    const user = statsResult.rows[0] || req.user;
+    const userId = req.user.id || req.user._id;
+    const user = await findUserById(userId) || req.user;
     res.json({
       user: formatUserResponse(user)
     });

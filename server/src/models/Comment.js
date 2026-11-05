@@ -30,3 +30,4 @@ CommentSchema.virtual('id').get(function() {
 CommentSchema.index({ match_id: 1, created_at: 1 });
 
 module.exports = mongoose.models.Comment || mongoose.model('Comment', CommentSchema);
+

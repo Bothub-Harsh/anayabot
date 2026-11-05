@@ -23,3 +23,4 @@ ReportSchema.virtual('id').get(function() {
 });
 
 module.exports = mongoose.models.Report || mongoose.model('Report', ReportSchema);
+

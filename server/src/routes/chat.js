@@ -1,7 +1,8 @@
 const express = require('express');
 const router = express.Router();
 const { requireAuth, optionalAuth } = require('../middleware/auth');
-const { query } = require('../database/db');
+const { addComment, findComments, models, memoryStore } = require('../database/db');
+const { v4: uuidv4 } = require('uuid');
 
 /**
  * GET /api/chat/:matchId/messages
@@ -10,34 +11,10 @@ const { query } = require('../database/db');
 router.get('/:matchId/messages', optionalAuth, async (req, res) => {
   try {
     const limit = Math.min(parseInt(req.query.limit) || 50, 200);
-    const before = req.query.before; // cursor-based pagination
+    const before = req.query.before || null;
 
-    let queryText = `
-      SELECT c.id, c.match_id, c.message, c.message_type, c.is_system,
-             c.is_deleted, c.created_at,
-             u.id as user_id, u.username, u.first_name,
-             json_agg(json_build_object('emoji', r.emoji, 'userId', r.user_id)) 
-               FILTER (WHERE r.id IS NOT NULL) as reactions
-      FROM comments c
-      LEFT JOIN users u ON c.user_id = u.id
-      LEFT JOIN reactions r ON c.id = r.comment_id
-      WHERE c.match_id = $1 AND c.is_deleted = FALSE
-    `;
-    
-    const params = [req.params.matchId];
-    
-    if (before) {
-      queryText += ` AND c.created_at < (SELECT created_at FROM comments WHERE id = $${params.length + 1})`;
-      params.push(before);
-    }
-    
-    queryText += ` GROUP BY c.id, u.id ORDER BY c.created_at DESC LIMIT $${params.length + 1}`;
-    params.push(limit);
-
-    const result = await query(queryText, params);
-
-    // Return in ascending order for display
-    res.json({ messages: result.rows.reverse() });
+    const messages = await findComments(req.params.matchId, { limit, before });
+    res.json({ messages });
   } catch (error) {
     console.error('Get messages error:', error);
     res.status(500).json({ error: 'Failed to fetch messages' });
@@ -60,14 +37,17 @@ router.post('/:matchId/messages', requireAuth, async (req, res) => {
       return res.status(400).json({ error: 'Message too long (max 500 chars)' });
     }
 
-    const result = await query(
-      `INSERT INTO comments (match_id, user_id, message, message_type)
-       VALUES ($1, $2, $3, $4)
-       RETURNING *`,
-      [req.params.matchId, req.user.id, message.trim(), messageType]
-    );
+    const userId = req.user.id || req.user._id;
+    const comment = await addComment({
+      match_id: req.params.matchId,
+      user_id: userId,
+      username: req.user.username || req.user.first_name || 'Player',
+      first_name: req.user.first_name || 'Player',
+      message: message.trim(),
+      message_type: messageType
+    });
 
-    res.status(201).json({ message: result.rows[0] });
+    res.status(201).json({ message: comment });
   } catch (error) {
     console.error('Post message error:', error);
     res.status(500).json({ error: 'Failed to post message' });
@@ -80,15 +60,31 @@ router.post('/:matchId/messages', requireAuth, async (req, res) => {
  */
 router.delete('/messages/:messageId', requireAuth, async (req, res) => {
   try {
-    const result = await query(
-      `UPDATE comments SET is_deleted = TRUE, deleted_by = $2
-       WHERE id = $1 AND (user_id = $2 OR $3 = TRUE)
-       RETURNING id`,
-      [req.params.messageId, req.user.id, req.user.is_admin]
-    );
+    const userId = req.user.id || req.user._id;
+    const isAdmin = !!req.user.is_admin;
+    const messageId = req.params.messageId;
 
-    if (result.rows.length === 0) {
-      return res.status(403).json({ error: 'Cannot delete this message' });
+    if (models.Comment && models.Comment.db.readyState === 1) {
+      const comment = await models.Comment.findById(messageId);
+      if (!comment) {
+        return res.status(404).json({ error: 'Message not found' });
+      }
+      if (comment.user_id !== userId && !isAdmin) {
+        return res.status(403).json({ error: 'Cannot delete this message' });
+      }
+      comment.is_deleted = true;
+      comment.deleted_by = userId;
+      await comment.save();
+    } else {
+      const c = memoryStore.comments.find(x => x.id === messageId || x._id === messageId);
+      if (!c) {
+        return res.status(404).json({ error: 'Message not found' });
+      }
+      if (c.user_id !== userId && !isAdmin) {
+        return res.status(403).json({ error: 'Cannot delete this message' });
+      }
+      c.is_deleted = true;
+      c.deleted_by = userId;
     }
 
     res.json({ success: true });
@@ -105,28 +101,49 @@ router.delete('/messages/:messageId', requireAuth, async (req, res) => {
 router.post('/messages/:messageId/report', requireAuth, async (req, res) => {
   try {
     const { reason, description } = req.body;
-
     if (!reason) {
       return res.status(400).json({ error: 'Reason is required' });
     }
 
-    // Get comment info
-    const commentResult = await query(
-      'SELECT user_id, match_id FROM comments WHERE id = $1',
-      [req.params.messageId]
-    );
+    const userId = req.user.id || req.user._id;
+    const messageId = req.params.messageId;
 
-    if (commentResult.rows.length === 0) {
-      return res.status(404).json({ error: 'Message not found' });
+    let reportedUserId = null;
+    let matchId = null;
+
+    if (models.Comment && models.Comment.db.readyState === 1) {
+      const comment = await models.Comment.findById(messageId);
+      if (!comment) return res.status(404).json({ error: 'Message not found' });
+      reportedUserId = comment.user_id;
+      matchId = comment.match_id;
+
+      await models.Report.create({
+        _id: uuidv4(),
+        reporter_id: userId,
+        reported_user_id: reportedUserId,
+        comment_id: messageId,
+        match_id: matchId,
+        reason,
+        description: description || null
+      });
+    } else {
+      const c = memoryStore.comments.find(x => x.id === messageId || x._id === messageId);
+      if (!c) return res.status(404).json({ error: 'Message not found' });
+      reportedUserId = c.user_id;
+      matchId = c.match_id;
+
+      memoryStore.reports.push({
+        _id: uuidv4(),
+        reporter_id: userId,
+        reported_user_id: reportedUserId,
+        comment_id: messageId,
+        match_id: matchId,
+        reason,
+        description: description || null,
+        status: 'pending',
+        created_at: new Date().toISOString()
+      });
     }
-
-    const comment = commentResult.rows[0];
-
-    await query(
-      `INSERT INTO reports (reporter_id, reported_user_id, comment_id, match_id, reason, description)
-       VALUES ($1, $2, $3, $4, $5, $6)`,
-      [req.user.id, comment.user_id, req.params.messageId, comment.match_id, reason, description || null]
-    );
 
     res.json({ success: true });
   } catch (error) {

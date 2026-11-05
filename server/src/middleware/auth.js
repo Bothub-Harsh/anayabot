@@ -1,5 +1,5 @@
 const crypto = require('crypto');
-const { query } = require('../database/db');
+const { createOrUpdateUser } = require('../database/db');
 
 /**
  * Verify Telegram WebApp initData
@@ -58,56 +58,8 @@ function isConfiguredAdmin(telegramId) {
 async function findOrCreateUser(telegramUser) {
   try {
     const isAdmin = isConfiguredAdmin(telegramUser.id);
-
-    // Try to find existing user
-    let result = await query(
-      'SELECT * FROM users WHERE telegram_id = $1',
-      [telegramUser.id]
-    );
-
-    if (result.rows.length > 0) {
-      // Update last seen, admin status, and profile info
-      await query(
-        `UPDATE users SET 
-         username = $2, first_name = $3, last_name = $4, 
-         photo_url = $5, is_admin = $6, last_seen_at = NOW()
-         WHERE telegram_id = $1`,
-        [
-          telegramUser.id,
-          telegramUser.username || null,
-          telegramUser.first_name,
-          telegramUser.last_name || null,
-          telegramUser.photo_url || null,
-          isAdmin
-        ]
-      );
-      result.rows[0].is_admin = isAdmin;
-      return result.rows[0];
-    }
-
-    // Create new user
-    result = await query(
-      `INSERT INTO users (telegram_id, username, first_name, last_name, photo_url, language_code, is_admin)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
-       RETURNING *`,
-      [
-        telegramUser.id,
-        telegramUser.username || null,
-        telegramUser.first_name,
-        telegramUser.last_name || null,
-        telegramUser.photo_url || null,
-        telegramUser.language_code || 'en',
-        isAdmin
-      ]
-    );
-
-    // Create player profile
-    await query(
-      'INSERT INTO player_profiles (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING',
-      [result.rows[0].id]
-    );
-
-    return result.rows[0];
+    const user = await createOrUpdateUser(telegramUser, isAdmin);
+    return user;
   } catch (error) {
     console.error('Find or create user error:', error);
     throw error;

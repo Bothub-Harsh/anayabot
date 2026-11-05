@@ -57,3 +57,4 @@ MatchSchema.index({ status: 1, visibility: 1, created_at: -1 });
 MatchSchema.index({ telegram_group_id: 1, status: 1 });
 
 module.exports = mongoose.models.Match || mongoose.model('Match', MatchSchema);
+

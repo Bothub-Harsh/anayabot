@@ -1,8 +1,21 @@
 const { v4: uuidv4 } = require('uuid');
-const { query, getClient } = require('../database/db');
-const { initializeGameState, getPublicGameState } = require('../game/ludoEngine');
+const {
+  findUserById,
+  findMatchById,
+  findMatchByRoomCode,
+  createMatchDoc,
+  updateMatchDoc,
+  findPublicMatches,
+  findWaitingMatchByGroup,
+  findActiveMatchesByGroup,
+  findGameState,
+  saveGameStateDoc,
+  createGameMove,
+  updateUserStats
+} = require('../database/db');
+const { initializeGameState } = require('../game/ludoEngine');
 
-// In-memory game states (would use Redis in production)
+// In-memory game states for high speed real-time gameplay
 const activeGameStates = new Map();
 const matchCompletedHooks = [];
 const matchStartedHooks = [];
@@ -28,6 +41,11 @@ function generateRoomCode() {
   return code;
 }
 
+async function roomCodeExists(roomCode) {
+  const match = await findMatchByRoomCode(roomCode);
+  return !!match;
+}
+
 async function createMatch(userId, options = {}) {
   const { 
     name, 
@@ -46,206 +64,139 @@ async function createMatch(userId, options = {}) {
     if (attempts > 10) throw new Error('Failed to generate unique room code');
   } while (await roomCodeExists(roomCode));
 
-  const client = await getClient();
-  try {
-    await client.query('BEGIN');
+  const creator = await findUserById(userId);
 
-    const matchResult = await client.query(
-      `INSERT INTO matches (room_code, name, max_players, visibility, creator_id, settings, telegram_group_id, telegram_message_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-       RETURNING *`,
-      [
-        roomCode, 
-        name || `Match ${roomCode}`, 
-        maxPlayers, 
-        visibility, 
-        userId, 
-        typeof settings === 'string' ? settings : JSON.stringify(settings),
-        telegramGroupId ? String(telegramGroupId) : null,
-        telegramMessageId ? String(telegramMessageId) : null
-      ]
-    );
-    const match = matchResult.rows[0];
+  const colors = ['red', 'blue', 'green', 'yellow'];
+  const initialPlayers = [{
+    userId,
+    username: creator?.username || creator?.first_name || 'Host',
+    first_name: creator?.first_name || 'Host',
+    color: colors[0],
+    position: 0,
+    status: 'waiting',
+    isReady: true,
+    joined_at: new Date()
+  }];
 
-    // Add creator as first player
-    const colors = ['red', 'blue', 'green', 'yellow'];
-    await client.query(
-      `INSERT INTO match_players (match_id, user_id, color, position, status)
-       VALUES ($1, $2, $3, $4, 'waiting')`,
-      [match.id, userId, colors[0], 0]
-    );
+  const match = await createMatchDoc({
+    room_code: roomCode,
+    name: name || `Match ${roomCode}`,
+    max_players: maxPlayers,
+    current_players: 1,
+    visibility,
+    creator_id: userId,
+    creator_username: creator?.username || null,
+    creator_name: creator?.first_name || null,
+    settings: typeof settings === 'string' ? JSON.parse(settings || '{}') : settings,
+    telegram_group_id: telegramGroupId ? String(telegramGroupId) : null,
+    telegram_message_id: telegramMessageId ? String(telegramMessageId) : null,
+    status: 'waiting',
+    players: initialPlayers
+  });
 
-    await client.query(
-      'UPDATE matches SET current_players = 1 WHERE id = $1',
-      [match.id]
-    );
-
-    await client.query('COMMIT');
-    return { ...match, current_players: 1 };
-  } catch (error) {
-    await client.query('ROLLBACK');
-    throw error;
-  } finally {
-    client.release();
-  }
+  return match;
 }
 
 async function joinMatch(matchId, userId) {
-  const client = await getClient();
-  try {
-    await client.query('BEGIN');
-
-    // Lock the match row
-    const matchResult = await client.query(
-      'SELECT * FROM matches WHERE id = $1 FOR UPDATE',
-      [matchId]
-    );
-    
-    if (matchResult.rows.length === 0) {
-      throw new Error('Match not found');
-    }
-
-    const match = matchResult.rows[0];
-
-    if (match.status !== 'waiting') {
-      throw new Error('Match is not accepting players');
-    }
-
-    if (match.current_players >= match.max_players) {
-      throw new Error('Match is full');
-    }
-
-    // Check if already in match
-    const existingPlayer = await client.query(
-      'SELECT id FROM match_players WHERE match_id = $1 AND user_id = $2',
-      [matchId, userId]
-    );
-
-    if (existingPlayer.rows.length > 0) {
-      throw new Error('Already in this match');
-    }
-
-    // Find next available color and position
-    const takenSlots = await client.query(
-      'SELECT color, position FROM match_players WHERE match_id = $1',
-      [matchId]
-    );
-    
-    const takenColors = new Set(takenSlots.rows.map(r => r.color));
-    const takenPositions = new Set(takenSlots.rows.map(r => r.position));
-    const colors = ['red', 'blue', 'green', 'yellow'];
-    
-    const availableColor = colors.find(c => !takenColors.has(c));
-    const availablePosition = [0, 1, 2, 3].find(p => !takenPositions.has(p));
-
-    if (!availableColor) throw new Error('No available colors');
-
-    await client.query(
-      `INSERT INTO match_players (match_id, user_id, color, position, status)
-       VALUES ($1, $2, $3, $4, 'waiting')`,
-      [matchId, userId, availableColor, availablePosition]
-    );
-
-    const newPlayerCount = match.current_players + 1;
-    await client.query(
-      'UPDATE matches SET current_players = $1 WHERE id = $2',
-      [newPlayerCount, matchId]
-    );
-
-    await client.query('COMMIT');
-    
-    return {
-      match: { ...match, current_players: newPlayerCount },
-      playerColor: availableColor,
-      playerPosition: availablePosition
-    };
-  } catch (error) {
-    await client.query('ROLLBACK');
-    throw error;
-  } finally {
-    client.release();
+  const match = await findMatchById(matchId);
+  if (!match) {
+    throw new Error('Match not found');
   }
+
+  if (match.status !== 'waiting') {
+    throw new Error('Match is not accepting players');
+  }
+
+  const activePlayers = (match.players || []).filter(p => p.status !== 'left');
+
+  if (activePlayers.length >= match.max_players) {
+    throw new Error('Match is full');
+  }
+
+  const existingPlayer = activePlayers.find(p => p.userId === userId);
+  if (existingPlayer) {
+    throw new Error('Already in this match');
+  }
+
+  const takenColors = new Set(activePlayers.map(r => r.color));
+  const takenPositions = new Set(activePlayers.map(r => r.position));
+  const colors = ['red', 'blue', 'green', 'yellow'];
+  
+  const availableColor = colors.find(c => !takenColors.has(c));
+  const availablePosition = [0, 1, 2, 3].find(p => !takenPositions.has(p));
+
+  if (!availableColor) throw new Error('No available colors');
+
+  const joiningUser = await findUserById(userId);
+  const newPlayer = {
+    userId,
+    username: joiningUser?.username || joiningUser?.first_name || 'Player',
+    first_name: joiningUser?.first_name || 'Player',
+    color: availableColor,
+    position: availablePosition,
+    status: 'waiting',
+    isReady: true,
+    joined_at: new Date()
+  };
+
+  const updatedPlayers = [...(match.players || []).filter(p => p.userId !== userId), newPlayer];
+  const newPlayerCount = updatedPlayers.filter(p => p.status !== 'left').length;
+
+  const updatedMatch = await updateMatchDoc(matchId, {
+    players: updatedPlayers,
+    current_players: newPlayerCount
+  });
+
+  return {
+    match: updatedMatch,
+    playerColor: availableColor,
+    playerPosition: availablePosition
+  };
 }
 
 async function startMatch(matchId, userId) {
-  const client = await getClient();
-  try {
-    await client.query('BEGIN');
+  const match = await findMatchById(matchId);
+  if (!match) throw new Error('Match not found');
 
-    const matchResult = await client.query(
-      'SELECT * FROM matches WHERE id = $1 FOR UPDATE',
-      [matchId]
-    );
+  if (match.creator_id !== userId) throw new Error('Only the creator can start the match');
+  if (match.status !== 'waiting') throw new Error('Match cannot be started');
+  
+  const activePlayers = (match.players || []).filter(p => p.status !== 'left');
+  if (activePlayers.length < 2) throw new Error('Need at least 2 players to start');
 
-    if (matchResult.rows.length === 0) throw new Error('Match not found');
-    const match = matchResult.rows[0];
-
-    if (match.creator_id !== userId) throw new Error('Only the creator can start the match');
-    if (match.status !== 'waiting') throw new Error('Match cannot be started');
-    if (match.current_players < 2) throw new Error('Need at least 2 players to start');
-
-    // Get all players
-    const playersResult = await client.query(
-      `SELECT mp.*, u.username, u.first_name, u.telegram_id
-       FROM match_players mp
-       JOIN users u ON mp.user_id = u.id
-       WHERE mp.match_id = $1
-       ORDER BY mp.position`,
-      [matchId]
-    );
-
-    const players = playersResult.rows.map(p => ({
-      userId: p.user_id,
-      username: p.username || p.first_name,
+  const players = activePlayers
+    .sort((a, b) => a.position - b.position)
+    .map(p => ({
+      userId: p.userId,
+      username: p.username || p.first_name || 'Player',
       color: p.color,
       position: p.position
     }));
 
-    // Initialize game state
-    const gameState = initializeGameState(players);
-    
-    // Save game state to DB
-    await client.query(
-      `INSERT INTO game_states (match_id, current_player_index, turn_number, phase, board_state)
-       VALUES ($1, $2, $3, $4, $5)
-       ON CONFLICT (match_id) DO UPDATE SET
-         current_player_index = $2, turn_number = $3, phase = $4, board_state = $5, updated_at = NOW()`,
-      [matchId, 0, 1, 'playing', JSON.stringify(gameState.boardState)]
-    );
+  // Initialize game state
+  const gameState = initializeGameState(players);
+  
+  // Save game state in MongoDB
+  await saveGameStateDoc(matchId, gameState);
 
-    await client.query(
-      `UPDATE matches SET status = 'playing', started_at = NOW() WHERE id = $1`,
-      [matchId]
-    );
+  const updatedMatch = await updateMatchDoc(matchId, {
+    status: 'playing',
+    started_at: new Date()
+  });
 
-    await client.query('COMMIT');
+  // Store in memory
+  activeGameStates.set(matchId, gameState);
 
-    // Store in memory
-    activeGameStates.set(matchId, gameState);
-
-    // Trigger match start hooks (e.g. for Telegram group announcement)
+  // Trigger match start hooks (e.g. for Telegram group announcement)
+  for (const hook of matchStartedHooks) {
     try {
-      const startedMatch = await query('SELECT * FROM matches WHERE id = $1', [matchId]);
-      if (startedMatch.rows.length > 0) {
-        for (const hook of matchStartedHooks) {
-          try {
-            hook(startedMatch.rows[0], players);
-          } catch (hookErr) {
-            console.warn('Match start hook error:', hookErr.message);
-          }
-        }
-      }
-    } catch (e) {
-      console.warn('Trigger start hooks error:', e.message);
+      hook(updatedMatch, players);
+    } catch (hookErr) {
+      console.warn('Match start hook error:', hookErr.message);
     }
-
-    return { match: { ...match, status: 'playing' }, gameState };
-  } catch (error) {
-    await client.query('ROLLBACK');
-    throw error;
-  } finally {
-    client.release();
   }
+
+  return { match: updatedMatch, gameState };
 }
 
 async function getGameState(matchId) {
@@ -255,38 +206,8 @@ async function getGameState(matchId) {
   }
 
   // Load from database
-  const result = await query(
-    `SELECT gs.*, m.status as match_status,
-     json_agg(json_build_object(
-       'userId', mp.user_id,
-       'username', COALESCE(u.username, u.first_name),
-       'color', mp.color,
-       'position', mp.position
-     ) ORDER BY mp.position) as players
-     FROM game_states gs
-     JOIN matches m ON gs.match_id = m.id
-     JOIN match_players mp ON m.id = mp.match_id
-     JOIN users u ON mp.user_id = u.id
-     WHERE gs.match_id = $1
-     GROUP BY gs.id, m.status`,
-    [matchId]
-  );
-
-  if (result.rows.length === 0) return null;
-
-  const row = result.rows[0];
-  const gameState = {
-    phase: row.phase,
-    players: row.players,
-    currentPlayerIndex: row.current_player_index,
-    turnNumber: row.turn_number,
-    boardState: row.board_state,
-    diceValue: row.dice_value,
-    diceRolled: row.dice_rolled,
-    consecutiveSixes: row.consecutive_sixes || 0,
-    winners: [],
-    lastAction: null
-  };
+  const gameState = await findGameState(matchId);
+  if (!gameState) return null;
 
   activeGameStates.set(matchId, gameState);
   return gameState;
@@ -295,256 +216,132 @@ async function getGameState(matchId) {
 async function saveGameState(matchId, gameState) {
   activeGameStates.set(matchId, gameState);
   
-  // Persist to DB asynchronously
-  query(
-    `UPDATE game_states SET 
-     current_player_index = $2, turn_number = $3, phase = $4,
-     board_state = $5, dice_value = $6, dice_rolled = $7,
-     consecutive_sixes = $8, updated_at = NOW()
-     WHERE match_id = $1`,
-    [
-      matchId,
-      gameState.currentPlayerIndex,
-      gameState.turnNumber,
-      gameState.phase,
-      JSON.stringify(gameState.boardState),
-      gameState.diceValue,
-      gameState.diceRolled,
-      gameState.consecutiveSixes || 0
-    ]
-  ).catch(err => console.error('Failed to save game state:', err));
+  // Persist to MongoDB asynchronously
+  saveGameStateDoc(matchId, gameState).catch(err => {
+    console.error('Failed to save game state to MongoDB:', err.message);
+  });
 }
 
 async function getPublicMatches() {
-  const result = await query(
-    `SELECT m.*, u.username as creator_username, u.first_name as creator_name
-     FROM matches m
-     JOIN users u ON m.creator_id = u.id
-     WHERE m.status IN ('waiting', 'playing') AND m.visibility = 'public'
-     ORDER BY m.created_at DESC
-     LIMIT 20`
-  );
-  return result.rows;
+  return await findPublicMatches();
 }
 
 async function getMatchById(matchId) {
-  const result = await query(
-    `SELECT m.*, u.username as creator_username, u.first_name as creator_name,
-     json_agg(json_build_object(
-       'userId', mp.user_id,
-       'username', COALESCE(u2.username, u2.first_name),
-       'color', mp.color,
-       'position', mp.position,
-       'status', mp.status,
-       'isReady', mp.is_ready
-     ) ORDER BY mp.position) FILTER (WHERE mp.id IS NOT NULL) as players
-     FROM matches m
-     JOIN users u ON m.creator_id = u.id
-     LEFT JOIN match_players mp ON m.id = mp.match_id
-     LEFT JOIN users u2 ON mp.user_id = u2.id
-     WHERE m.id = $1
-     GROUP BY m.id, u.username, u.first_name`,
-    [matchId]
-  );
-  return result.rows[0] || null;
+  return await findMatchById(matchId);
 }
 
 async function getMatchByRoomCode(roomCode) {
-  const result = await query(
-    'SELECT * FROM matches WHERE room_code = $1',
-    [roomCode.toUpperCase()]
-  );
-  return result.rows[0] || null;
-}
-
-async function roomCodeExists(roomCode) {
-  const result = await query(
-    'SELECT id FROM matches WHERE room_code = $1',
-    [roomCode]
-  );
-  return result.rows.length > 0;
+  return await findMatchByRoomCode(roomCode);
 }
 
 async function saveMove(matchId, userId, moveData) {
-  await query(
-    `INSERT INTO game_moves (match_id, user_id, turn_number, move_type, dice_value, token_id, from_position, to_position, captured_token, move_data)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
-    [
-      matchId, userId, moveData.turnNumber, moveData.type,
-      moveData.diceValue, moveData.tokenId, moveData.from,
-      moveData.to, JSON.stringify(moveData.captured || null),
-      JSON.stringify(moveData)
-    ]
-  );
+  await createGameMove({
+    match_id: matchId,
+    user_id: userId,
+    turn_number: moveData.turnNumber,
+    move_type: moveData.type,
+    dice_value: moveData.diceValue,
+    token_id: moveData.tokenId,
+    from_position: moveData.from,
+    to_position: moveData.to,
+    captured_token: moveData.captured || null,
+    move_data: moveData
+  });
 }
 
 async function completeMatch(matchId, winners) {
-  const client = await getClient();
-  try {
-    await client.query('BEGIN');
+  const winnerId = winners[0]?.userId || null;
+  
+  const updatedMatch = await updateMatchDoc(matchId, {
+    status: 'completed',
+    winner_id: winnerId,
+    completed_at: new Date()
+  });
 
-    const winnerId = winners[0]?.userId || null;
+  // Update player profiles in MongoDB
+  for (let i = 0; i < winners.length; i++) {
+    const winner = winners[i];
+    const isWin = i === 0;
     
-    await client.query(
-      `UPDATE matches SET status = 'completed', winner_id = $2, completed_at = NOW() WHERE id = $1`,
-      [matchId, winnerId]
-    );
+    await updateUserStats(winner.userId, {
+      winsDelta: isWin ? 1 : 0,
+      lossesDelta: isWin ? 0 : 1,
+      xpDelta: isWin ? 100 : 25
+    });
+  }
 
-    // Update player profiles
-    for (let i = 0; i < winners.length; i++) {
-      const winner = winners[i];
-      const isWin = i === 0;
-      
-      await client.query(
-        `INSERT INTO player_profiles (user_id, total_matches, wins, losses, win_streak, best_win_streak, total_xp)
-         VALUES ($1, 1, $2, $3, $4, $4, $5)
-         ON CONFLICT (user_id) DO UPDATE SET
-           total_matches = player_profiles.total_matches + 1,
-           wins = player_profiles.wins + $2,
-           losses = player_profiles.losses + $3,
-           win_streak = CASE WHEN $2 = 1 THEN player_profiles.win_streak + 1 ELSE 0 END,
-           best_win_streak = GREATEST(player_profiles.best_win_streak, 
-             CASE WHEN $2 = 1 THEN player_profiles.win_streak + 1 ELSE player_profiles.best_win_streak END),
-           total_xp = player_profiles.total_xp + $5,
-           level = GREATEST(1, (player_profiles.total_xp + $5) / 1000 + 1),
-           updated_at = NOW()`,
-        [winner.userId, isWin ? 1 : 0, isWin ? 0 : 1, isWin ? 1 : 0, isWin ? 100 : 25]
-      );
-    }
+  activeGameStates.delete(matchId);
 
-    await client.query('COMMIT');
-    activeGameStates.delete(matchId);
-
-    // Trigger match completion hooks (e.g. for Telegram group announcement)
-    try {
-      const finishedMatch = await query('SELECT * FROM matches WHERE id = $1', [matchId]);
-      if (finishedMatch.rows.length > 0) {
-        for (const hook of matchCompletedHooks) {
-          try {
-            hook(finishedMatch.rows[0], winners);
-          } catch (hookErr) {
-            console.warn('Match completion hook error:', hookErr.message);
-          }
-        }
+  // Trigger match completion hooks (e.g. for Telegram group announcement)
+  if (updatedMatch) {
+    for (const hook of matchCompletedHooks) {
+      try {
+        hook(updatedMatch, winners);
+      } catch (hookErr) {
+        console.warn('Match completion hook error:', hookErr.message);
       }
-    } catch (annErr) {
-      console.warn('Announcement trigger error:', annErr.message);
     }
-  } catch (error) {
-    await client.query('ROLLBACK');
-    throw error;
-  } finally {
-    client.release();
   }
 }
 
 async function leaveMatch(matchId, userId) {
-  const client = await getClient();
-  try {
-    await client.query('BEGIN');
+  const match = await findMatchById(matchId);
+  if (!match) return;
 
-    await client.query(
-      `UPDATE match_players SET status = 'left', left_at = NOW()
-       WHERE match_id = $1 AND user_id = $2`,
-      [matchId, userId]
-    );
-
-    await client.query(
-      `UPDATE matches SET current_players = GREATEST(0, current_players - 1)
-       WHERE id = $1`,
-      [matchId]
-    );
-
-    // Check if match should be cancelled
-    const remaining = await client.query(
-      `SELECT COUNT(*) FROM match_players WHERE match_id = $1 AND status NOT IN ('left', 'disconnected')`,
-      [matchId]
-    );
-
-    const matchResult = await client.query(
-      'SELECT status FROM matches WHERE id = $1',
-      [matchId]
-    );
-
-    const remainingCount = parseInt(remaining?.rows?.[0]?.count ?? 0, 10);
-    const matchStatus = matchResult?.rows?.[0]?.status;
-
-    if (remainingCount < 2 && matchStatus === 'waiting') {
-      await client.query(
-        `UPDATE matches SET status = 'cancelled', cancelled_at = NOW() WHERE id = $1`,
-        [matchId]
-      );
+  const players = (match.players || []).map(p => {
+    if (p.userId === userId) {
+      return { ...p, status: 'left', left_at: new Date() };
     }
+    return p;
+  });
 
-    await client.query('COMMIT');
-  } catch (error) {
-    await client.query('ROLLBACK');
-    throw error;
-  } finally {
-    client.release();
+  const remainingActive = players.filter(p => p.status !== 'left');
+  const updateData = {
+    players,
+    current_players: Math.max(0, remainingActive.length)
+  };
+
+  if (remainingActive.length < 2 && match.status === 'waiting') {
+    updateData.status = 'cancelled';
+    updateData.cancelled_at = new Date();
   }
+
+  await updateMatchDoc(matchId, updateData);
 }
 
 async function updateMatchTelegramMessage(matchId, messageId) {
-  return await query(
-    'UPDATE matches SET telegram_message_id = $1 WHERE id = $2',
-    [messageId ? String(messageId) : null, matchId]
-  );
+  return await updateMatchDoc(matchId, {
+    telegram_message_id: messageId ? String(messageId) : null
+  });
 }
 
 async function getWaitingMatchByGroup(telegramGroupId) {
-  const result = await query(
-    `SELECT * FROM matches 
-     WHERE telegram_group_id = $1 AND status = 'waiting' 
-     ORDER BY created_at DESC LIMIT 1`,
-    [String(telegramGroupId)]
-  );
-  return result.rows[0] || null;
+  return await findWaitingMatchByGroup(telegramGroupId);
 }
 
 async function getActiveGroupMatches(telegramGroupId) {
-  const result = await query(
-    `SELECT * FROM matches 
-     WHERE telegram_group_id = $1 AND status IN ('waiting', 'playing') 
-     ORDER BY created_at DESC`,
-    [String(telegramGroupId)]
-  );
-  return result.rows;
+  return await findActiveMatchesByGroup(telegramGroupId);
 }
 
 async function cancelMatch(matchId, userId, isAdmin = false) {
-  const client = await getClient();
-  try {
-    await client.query('BEGIN');
-    const matchResult = await client.query(
-      'SELECT * FROM matches WHERE id = $1 FOR UPDATE',
-      [matchId]
-    );
-    if (matchResult.rows.length === 0) throw new Error('Match not found');
-    const match = matchResult.rows[0];
+  const match = await findMatchById(matchId);
+  if (!match) throw new Error('Match not found');
 
-    if (!isAdmin && match.creator_id !== userId) {
-      throw new Error('Only the host or an administrator can cancel this match');
-    }
-
-    if (match.status === 'completed' || match.status === 'cancelled') {
-      throw new Error(`Match is already ${match.status}`);
-    }
-
-    await client.query(
-      `UPDATE matches SET status = 'cancelled', cancelled_at = NOW() WHERE id = $1`,
-      [matchId]
-    );
-
-    await client.query('COMMIT');
-    activeGameStates.delete(matchId);
-    return { ...match, status: 'cancelled' };
-  } catch (err) {
-    await client.query('ROLLBACK');
-    throw err;
-  } finally {
-    client.release();
+  if (!isAdmin && match.creator_id !== userId) {
+    throw new Error('Only the host or an administrator can cancel this match');
   }
+
+  if (match.status === 'completed' || match.status === 'cancelled') {
+    throw new Error(`Match is already ${match.status}`);
+  }
+
+  const updatedMatch = await updateMatchDoc(matchId, {
+    status: 'cancelled',
+    cancelled_at: new Date()
+  });
+
+  activeGameStates.delete(matchId);
+  return updatedMatch;
 }
 
 module.exports = {

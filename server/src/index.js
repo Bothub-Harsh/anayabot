@@ -14,7 +14,7 @@ const helmet = require('helmet');
 const morgan = require('morgan');
 const rateLimit = require('express-rate-limit');
 
-const { initializeDatabase, query } = require('./database/db');
+const { initializeDatabase, closeDatabase, getDatabaseStatus } = require('./database/db');
 const { initializeBot, getBot } = require('./bot/bot');
 const { initializeSocketHandlers } = require('./socket/socketManager');
 
@@ -94,20 +94,12 @@ app.use('/api/', limiter);
 
 // Health check (reports status and DB connectivity without leaking credentials)
 app.get('/health', async (req, res) => {
-  let dbStatus = 'disconnected';
-  try {
-    const result = await query('SELECT 1 as healthy');
-    if (result && result.rows) {
-      dbStatus = 'connected';
-    }
-  } catch (err) {
-    dbStatus = 'error';
-  }
-
-  const isHealthy = dbStatus === 'connected' || !process.env.DATABASE_URL;
+  const dbStatus = getDatabaseStatus();
+  const isHealthy = dbStatus.status === 'connected' || !process.env.MONGODB_URI;
   res.status(isHealthy ? 200 : 503).json({ 
     status: isHealthy ? 'ok' : 'degraded',
-    database: dbStatus,
+    database: dbStatus.status,
+    databaseType: dbStatus.type,
     uptime: Math.floor(process.uptime()),
     timestamp: new Date().toISOString(),
     version: '1.0.0'
@@ -172,8 +164,13 @@ async function startServer() {
     });
 
     // Graceful shutdown
-    const gracefulShutdown = (signal) => {
+    const gracefulShutdown = async (signal) => {
       console.log(`\n🛑 Received ${signal}, shutting down gracefully...`);
+      try {
+        await closeDatabase();
+      } catch (e) {
+        console.warn('Error during DB close:', e.message);
+      }
       server.close(() => {
         console.log('HTTP server closed');
         process.exit(0);

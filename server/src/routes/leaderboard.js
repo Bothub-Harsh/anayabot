@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { query } = require('../database/db');
+const { getLeaderboardUsers, models, memoryStore, isDBConnected } = require('../database/db');
 
 /**
  * GET /api/leaderboard
@@ -13,41 +13,11 @@ router.get('/', async (req, res) => {
     const limit = Math.min(parseInt(req.query.limit) || 50, 100);
     const offset = (page - 1) * limit;
 
-    let dateFilter = '';
-    if (period === 'weekly') {
-      dateFilter = "AND pp.updated_at > NOW() - INTERVAL '7 days'";
-    } else if (period === 'monthly') {
-      dateFilter = "AND pp.updated_at > NOW() - INTERVAL '30 days'";
-    }
-
-    const result = await query(
-      `SELECT 
-         ROW_NUMBER() OVER (ORDER BY pp.wins DESC, pp.total_xp DESC) as rank,
-         u.id, u.username, u.first_name, u.last_name, u.photo_url,
-         pp.total_matches, pp.wins, pp.losses, pp.win_streak,
-         pp.best_win_streak, pp.total_xp, pp.level,
-         CASE WHEN pp.total_matches > 0 
-           THEN ROUND((pp.wins::NUMERIC / pp.total_matches) * 100, 1)
-           ELSE 0 
-         END as win_rate
-       FROM player_profiles pp
-       JOIN users u ON pp.user_id = u.id
-       WHERE u.is_banned = FALSE ${dateFilter}
-       ORDER BY pp.wins DESC, pp.total_xp DESC
-       LIMIT $1 OFFSET $2`,
-      [limit, offset]
-    );
-
-    // Get total count
-    const countResult = await query(
-      `SELECT COUNT(*) FROM player_profiles pp
-       JOIN users u ON pp.user_id = u.id
-       WHERE u.is_banned = FALSE ${dateFilter}`
-    );
+    const { leaderboard, total } = await getLeaderboardUsers({ limit, offset, period });
 
     res.json({
-      leaderboard: result.rows,
-      total: parseInt(countResult.rows[0].count),
+      leaderboard,
+      total,
       page,
       limit,
       period
@@ -64,23 +34,15 @@ router.get('/', async (req, res) => {
  */
 router.get('/user/:userId', async (req, res) => {
   try {
-    const result = await query(
-      `SELECT rank FROM (
-         SELECT u.id,
-           ROW_NUMBER() OVER (ORDER BY pp.wins DESC, pp.total_xp DESC) as rank
-         FROM player_profiles pp
-         JOIN users u ON pp.user_id = u.id
-         WHERE u.is_banned = FALSE
-       ) ranked
-       WHERE id = $1`,
-      [req.params.userId]
-    );
+    const userId = req.params.userId;
+    const { leaderboard } = await getLeaderboardUsers({ limit: 1000, offset: 0, period: 'all' });
+    const userEntry = leaderboard.find(u => String(u.id) === String(userId));
 
-    if (result.rows.length === 0) {
+    if (!userEntry) {
       return res.status(404).json({ error: 'User not found in leaderboard' });
     }
 
-    res.json({ rank: parseInt(result.rows[0].rank) });
+    res.json({ rank: userEntry.rank });
   } catch (error) {
     console.error('Get user rank error:', error);
     res.status(500).json({ error: 'Failed to fetch user rank' });
