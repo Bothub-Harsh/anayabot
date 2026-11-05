@@ -23,12 +23,18 @@ export function AppProvider({ children }) {
     try {
       let tgInitData = '';
       
-      // Try Telegram WebApp
+      // Initialize Telegram WebApp SDK
       if (window.Telegram?.WebApp) {
         const tg = window.Telegram.WebApp;
-        tg.ready();
-        tg.expand();
-        tg.enableClosingConfirmation();
+        try {
+          tg.ready();
+          tg.expand();
+          if (typeof tg.enableClosingConfirmation === 'function') {
+            tg.enableClosingConfirmation();
+          }
+        } catch (e) {
+          console.warn('Telegram WebApp ready/expand note:', e.message);
+        }
         tgInitData = tg.initData || '';
       }
 
@@ -44,24 +50,37 @@ export function AppProvider({ children }) {
       const sock = connectSocket(tgInitData);
       setSocket(sock);
 
-      // Login / fetch user
+      // Login / fetch user via Telegram initData
       try {
         const data = await api.login();
         setUser(data.user);
 
         // Deep linking / start parameter routing
         const urlParams = new URLSearchParams(window.location.search);
+        const hashParams = new URLSearchParams(window.location.hash.replace(/^#/, ''));
+        
+        // Extract start parameter from all possible Telegram delivery mechanisms
         const rawStartParam = window.Telegram?.WebApp?.initDataUnsafe?.start_param ||
                               urlParams.get('startapp') ||
                               urlParams.get('tgWebAppStartParam') ||
+                              hashParams.get('tgWebAppStartParam') ||
+                              hashParams.get('startapp') ||
                               urlParams.get('matchId') ||
                               urlParams.get('join') || '';
+
+        // Extract path-based route fallback (e.g. /match/:id or /game/:id)
+        let pathParam = '';
+        const pathname = window.location.pathname || '';
+        if (pathname.startsWith('/match/') || pathname.startsWith('/game/')) {
+          pathParam = pathname.split('/')[2] || '';
+        }
+
         const targetPage = urlParams.get('page');
 
         if (targetPage) {
           setCurrentPage(targetPage);
-        } else if (rawStartParam) {
-          const matchIdentifier = rawStartParam.replace(/^match_/, '').trim();
+        } else if (rawStartParam || pathParam) {
+          const matchIdentifier = String(rawStartParam || pathParam).replace(/^match_/, '').trim();
           if (matchIdentifier) {
             try {
               let matchData = null;
@@ -96,11 +115,14 @@ export function AppProvider({ children }) {
                   setCurrentPage('home');
                 }
               } else {
-                setCurrentPage('home');
+                // Show proper Match Not Found screen
+                setCurrentPage('match-not-found');
+                setPageParams({ requestedId: matchIdentifier });
               }
             } catch (navErr) {
               console.warn('Auto match routing note:', navErr.message);
-              setCurrentPage('home');
+              setCurrentPage('match-not-found');
+              setPageParams({ requestedId: matchIdentifier });
             }
           }
         }
@@ -118,25 +140,24 @@ export function AppProvider({ children }) {
 
   useEffect(() => {
     initTelegram();
+
     return () => {
       disconnectSocket();
     };
   }, [initTelegram]);
 
-  const value = {
-    user,
-    setUser,
-    loading,
-    error,
-    socket,
-    currentPage,
-    pageParams,
-    navigate,
-    initData
-  };
-
   return (
-    <AppContext.Provider value={value}>
+    <AppContext.Provider value={{
+      user,
+      setUser,
+      loading,
+      error,
+      socket,
+      currentPage,
+      pageParams,
+      navigate,
+      initData
+    }}>
       {children}
     </AppContext.Provider>
   );
@@ -144,6 +165,8 @@ export function AppProvider({ children }) {
 
 export function useApp() {
   const context = useContext(AppContext);
-  if (!context) throw new Error('useApp must be used within AppProvider');
+  if (!context) {
+    throw new Error('useApp must be used within an AppProvider');
+  }
   return context;
 }

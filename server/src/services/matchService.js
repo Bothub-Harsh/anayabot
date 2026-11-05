@@ -227,11 +227,21 @@ async function getPublicMatches() {
 }
 
 async function getMatchById(matchId) {
-  return await findMatchById(matchId);
+  if (!matchId) return null;
+  let match = await findMatchById(matchId);
+  if (!match && typeof matchId === 'string' && matchId.trim().length <= 10) {
+    match = await findMatchByRoomCode(matchId.trim().toUpperCase());
+  }
+  return match;
 }
 
 async function getMatchByRoomCode(roomCode) {
-  return await findMatchByRoomCode(roomCode);
+  if (!roomCode) return null;
+  let match = await findMatchByRoomCode(roomCode);
+  if (!match && typeof roomCode === 'string') {
+    match = await findMatchById(roomCode.trim());
+  }
+  return match;
 }
 
 async function saveMove(matchId, userId, moveData) {

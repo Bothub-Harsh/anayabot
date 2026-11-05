@@ -231,7 +231,7 @@ async function test(description, fn) {
   });
 
   // 10. Direct Telegram Mini App Launch URL format
-  await test('10. getMiniAppDirectLink produces https://t.me/BOT_USERNAME/APP_SHORT_NAME?startapp=match_MATCH_ID', () => {
+  await test('10. getMiniAppDirectLink produces https://t.me/BOT_USERNAME/APP_SHORT_NAME?startapp=MATCH_ID', () => {
     process.env.TELEGRAM_BOT_USERNAME = 'AnayaReplyBot';
     process.env.TELEGRAM_MINI_APP_SHORT_NAME = 'ludo';
 
@@ -240,7 +240,7 @@ async function test(description, fn) {
 
     assert.strictEqual(
       link,
-      `https://t.me/AnayaReplyBot/ludo?startapp=match_${testMatchId}`
+      `https://t.me/AnayaReplyBot/ludo?startapp=${testMatchId}`
     );
     assert.strictEqual(link.includes('localhost'), false);
     assert.strictEqual(link.includes('http://'), false);
@@ -283,7 +283,7 @@ async function test(description, fn) {
     assert.strictEqual(btn.text, '🎮 OPEN GAME');
     assert.strictEqual(
       btn.url,
-      `https://t.me/AnayaReplyBot/ludo?startapp=match_${testMatchId}`
+      `https://t.me/AnayaReplyBot/ludo?startapp=${testMatchId}`
     );
   });
 

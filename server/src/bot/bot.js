@@ -65,13 +65,13 @@ function getValidWebAppUrl(pathOrParams = '') {
 
 /**
  * Generates direct Telegram Mini App launch link
- * Format: https://t.me/BOT_USERNAME/APP_SHORT_NAME?startapp=match_MATCH_ID
+ * Format: https://t.me/BOT_USERNAME/APP_SHORT_NAME?startapp=MATCH_ID
  */
 function getMiniAppDirectLink(matchId = '') {
   const botUsername = (process.env.TELEGRAM_BOT_USERNAME || BOT_USERNAME || 'AnayaReplyBot').trim().replace(/^@/, '');
   const shortName = (process.env.TELEGRAM_MINI_APP_SHORT_NAME || MINI_APP_SHORT_NAME || 'ludo').trim();
 
-  const param = matchId ? `match_${matchId}` : '';
+  const param = matchId ? String(matchId).trim() : '';
   if (shortName) {
     return `https://t.me/${botUsername}/${shortName}${param ? `?startapp=${param}` : ''}`;
   }

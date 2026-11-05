@@ -10,6 +10,7 @@ import ProfilePage from './pages/ProfilePage';
 import LeaderboardPage from './pages/LeaderboardPage';
 import SettingsPage from './pages/SettingsPage';
 import AdminPage from './pages/AdminPage';
+import MatchNotFoundPage from './pages/MatchNotFoundPage';
 
 function AppContent() {
   const { user, currentPage, navigate, loading, error } = useApp();
@@ -84,6 +85,8 @@ function AppContent() {
         return <SettingsPage />;
       case 'admin':
         return <AdminPage />;
+      case 'match-not-found':
+        return <MatchNotFoundPage />;
       default:
         return <HomePage />;
     }
