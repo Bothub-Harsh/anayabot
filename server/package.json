@@ -1,0 +1,32 @@
+{
+  "name": "ludo-arena-server",
+  "version": "1.0.0",
+  "description": "Ludo Arena - Multiplayer Telegram Ludo Gaming Platform Backend",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "nodemon src/index.js",
+    "test": "node test/ludo.test.js && node test/bot.test.js && node test/group_bot.test.js && node test/health.test.js",
+    "migrate": "node src/database/migrate.js",
+    "db:setup": "node src/database/setup-db.js",
+    "seed": "node src/database/seed.js"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "cors": "^2.8.5",
+    "crypto": "^1.0.1",
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2",
+    "express-rate-limit": "^7.1.5",
+    "helmet": "^7.1.0",
+    "jsonwebtoken": "^9.0.2",
+    "mongoose": "^9.12.0",
+    "morgan": "^1.10.0",
+    "node-telegram-bot-api": "^0.64.0",
+    "socket.io": "^4.7.2",
+    "uuid": "^9.0.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.2"
+  }
+}

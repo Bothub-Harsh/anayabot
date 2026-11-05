@@ -1,0 +1,59 @@
+databases:
+  - name: ludo-arena-db
+    databaseName: ludo_arena
+    user: ludo_admin
+    plan: free
+    region: oregon
+    postgresMajorVersion: 16
+
+services:
+  # ==============================================================================
+  # 1. BACKEND WEB SERVICE (Express API + WebSocket Socket.IO + Telegram Bot)
+  # ==============================================================================
+  - type: web
+    name: ludo-arena-server
+    runtime: node
+    plan: free
+    region: oregon
+    rootDir: server
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000
+      - key: DATABASE_URL
+        fromDatabase:
+          name: ludo-arena-db
+          property: connectionString
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false # Enter your Telegram Bot Token in Render Dashboard
+      - key: TELEGRAM_BOT_USERNAME
+        value: AnayaReplyBot
+      - key: TELEGRAM_MINI_APP_SHORT_NAME
+        value: ludo
+      - key: ADMIN_TELEGRAM_IDS
+        sync: false # e.g. 8670715518,8232988642
+      - key: CLIENT_URL
+        sync: false # Set to your deployed frontend URL (e.g. https://ludo-arena-client.onrender.com)
+      - key: WEB_APP_URL
+        sync: false # Set to your deployed frontend URL (e.g. https://ludo-arena-client.onrender.com)
+
+  # ==============================================================================
+  # 2. FRONTEND STATIC SITE (React + Vite SPA)
+  # ==============================================================================
+  - type: static
+    name: ludo-arena-client
+    rootDir: client
+    buildCommand: npm install && npm run build
+    staticPublishPath: dist
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
+    envVars:
+      - key: VITE_SERVER_URL
+        sync: false # Set to your deployed backend URL (e.g. https://ludo-arena-server.onrender.com)
+
